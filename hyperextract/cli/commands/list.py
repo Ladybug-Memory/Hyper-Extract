@@ -7,6 +7,7 @@ from rich.text import Text
 import typer
 
 from hyperextract.utils.template_engine import Gallery
+from hyperextract.ladybug_db import list_ka_subgraphs
 from hyperextract.utils.logging import get_logger
 
 logger = get_logger("he.list")
@@ -109,6 +110,34 @@ def template(
     console.print(
         "[dim]Tip: Use [bold]he parse <input> -t <template_id> -l <lang>[/bold] to extract with a template[/dim]"
     )
+
+
+@app.command(name="subgraph")
+def subgraph():
+    """List all LadybugDB subgraphs."""
+    logger.info("command=list-subgraph")
+
+    subgraphs = list_ka_subgraphs()
+
+    if not subgraphs:
+        console.print("[yellow]No subgraphs found.[/yellow]")
+        console.print("[dim]Create one with: he parse ... --db <name>[/dim]")
+        return
+
+    table = Table(
+        title="LadybugDB Subgraphs",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("Name", style="cyan")
+
+    for sg in sorted(subgraphs):
+        table.add_row(sg)
+
+    console.print(table)
+    console.print(f"\n[dim]Total: {len(subgraphs)} subgraphs[/dim]")
+    console.print()
+    console.print("[dim]Usage: use --db <name> with he parse / he show / he talk[/dim]")
 
 
 @app.command(name="method")

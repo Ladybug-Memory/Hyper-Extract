@@ -96,8 +96,13 @@ class LadybugDBManager:
         return self._db
 
     def close(self) -> None:
-        """Close database connection."""
-        self._conn = None
+        """Close the database connection."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
         self._db = None
 
     def _init_schema(self) -> None:
@@ -1065,49 +1070,46 @@ def load_ka_from_db(
 
 
 # =========================================================================
-# Subgraph-based KA storage (isolated per-KA graphs)
+# Subgraph-based KA storage (strongly-typed per-KA graphs)
 # =========================================================================
+#
+# Each subgraph is a separate ``he.<name>.lbdb`` database file created
+# via ``CREATE GRAPH <name>`` on the main DB connection.  All DDL and
+# DML go through the main DB connection with ``USE GRAPH``, so the
+# subgraph is registered in the main catalog automatically.
+
+import re
 
 
 def _sanitize_graph_name(name: str) -> str:
-    """Convert an arbitrary string into a valid LadybugDB graph name.
-
-    Replaces non-alphanumeric characters with underscores so that any
-    KA path or UUID can be used as a graph identifier.
-    """
-    import re
+    """Normalise an arbitrary string into a valid graph name."""
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-    # Ensure it doesn't start with a digit
     if safe and safe[0].isdigit():
         safe = "g_" + safe
     return safe or "ka"
 
 
-def _subgraph_connection(graph_name: str) -> lb.Connection:
-    """Create a temporary connection scoped to a named subgraph.
+def _subgraph_conn(safe_name: str) -> lb.Connection:
+    """Create a connection to the subgraph through the main DB.
 
-    Returns a connection that is already ``USE``-ing *graph_name*.
-    The caller is responsible for closing it.
+    ``CREATE GRAPH`` if needed, then ``USE GRAPH``.  All DDL/DML
+    go through the main ``lb.Database`` so the subgraph is
+    registered in the catalog automatically.
     """
     mgr = LadybugDBManager.get_instance()
     conn = lb.Connection(mgr.database)
     try:
-        conn.execute(f"CREATE GRAPH {graph_name}")
+        conn.execute(f"CREATE GRAPH {safe_name}")
     except RuntimeError as e:
-        # "already exists" is fine; any other error re-raise
         if "already exists" not in str(e).lower():
+            conn.close()
             raise
-    conn.execute(f"USE GRAPH {graph_name}")
+    conn.execute(f"USE GRAPH {safe_name}")
     return conn
 
 
-def _init_subgraph_schema(conn: lb.Connection) -> None:
-    """Create the Entity node table inside a subgraph.
-
-    Edges are stored as ``Entity`` rows with ``entity_type='edge'`` and
-    ``source`` / ``target`` embedded in the ``data`` JSON, because
-    LadybugDB ``REL TABLE`` does not work correctly inside subgraphs.
-    """
+def _init_ka_schema(conn: lb.Connection) -> None:
+    """DDL: create Entity node table and Relates rel table."""
     try:
         conn.execute("INSTALL JSON")
         conn.execute("LOAD EXTENSION JSON")
@@ -1122,6 +1124,13 @@ def _init_subgraph_schema(conn: lb.Connection) -> None:
             PRIMARY KEY (id)
         )"""
     )
+    conn.execute(
+        """CREATE REL TABLE IF NOT EXISTS Relates (
+            FROM Entity TO Entity,
+            relation_type STRING,
+            data JSON
+        )"""
+    )
 
 
 def store_ka_in_subgraph(
@@ -1131,48 +1140,52 @@ def store_ka_in_subgraph(
 ) -> None:
     """Store KA data in a dedicated LadybugDB subgraph.
 
-    Creates (or reuses) the subgraph *graph_name*, creates the entity/relation
-    schema, and inserts all nodes and edges as Entity rows and Relates
-    relationships.
+    Creates (or reuses) the subgraph via ``CREATE GRAPH`` on the main
+    DB connection, runs DDL to create Entity / Relates tables, then
+    inserts all nodes and edges.
 
     Args:
-        graph_name: Name for the subgraph (e.g. the KA path slug).
-        data_dict: The serialised KA data dict (from ``model_dump()``).
-        metadata: Optional metadata dict (stored as Entity with id="_meta").
+        graph_name: Name for the subgraph.
+        data_dict: Serialised KA data dict (from ``model_dump()``).
+        metadata: Optional metadata dict.
     """
     safe_name = _sanitize_graph_name(graph_name)
-    conn = _subgraph_connection(safe_name)
-    try:
-        _init_subgraph_schema(conn)
 
-        # ── Store metadata as a sentinel entity ──
+    conn = _subgraph_conn(safe_name)
+    try:
+        _init_ka_schema(conn)
+
+        # ── Metadata ──
         if metadata:
             meta_json = json.dumps(metadata, ensure_ascii=False, default=str)
             conn.execute(
-                """MERGE (e:Entity {id: '_meta'})
-                   ON MATCH SET e.entity_type = 'metadata', e.data = $data
-                   ON CREATE SET e.entity_type = 'metadata', e.data = $data""",
+                "MERGE (e:Entity {id: '_meta'}) "
+                "ON MATCH SET e.entity_type = 'metadata', e.data = $data "
+                "ON CREATE SET e.entity_type = 'metadata', e.data = $data",
                 parameters={"data": meta_json},
             )
 
-        # ── Store entities / nodes ──
+        # ── Nodes / entities ──
         entities = data_dict.get("nodes", data_dict.get("entities", []))
         for i, entity in enumerate(entities):
             if not isinstance(entity, dict):
                 continue
             entity_id = entity.get("name", entity.get("id", str(i)))
             entity_type = entity.get("type", entity.get("label", "entity"))
-            data_json = json.dumps(entity, ensure_ascii=False, default=str)
             conn.execute(
-                """MERGE (e:Entity {id: $id})
-                   ON MATCH SET e.entity_type = $type, e.data = $data
-                   ON CREATE SET e.entity_type = $type, e.data = $data""",
-                parameters={"id": entity_id, "type": entity_type, "data": data_json},
+                "MERGE (e:Entity {id: $id}) "
+                "ON MATCH SET e.entity_type = $type, e.data = $data "
+                "ON CREATE SET e.entity_type = $type, e.data = $data",
+                parameters={
+                    "id": entity_id,
+                    "type": entity_type,
+                    "data": json.dumps(entity, ensure_ascii=False, default=str),
+                },
             )
 
-        # ── Store relationships / edges as Entity nodes ──
+        # ── Edges / relations (REL TABLE) ──
         relations = data_dict.get("edges", data_dict.get("relations", []))
-        for i, relation in enumerate(relations):
+        for relation in relations:
             if not isinstance(relation, dict):
                 continue
 
@@ -1190,21 +1203,28 @@ def store_ka_in_subgraph(
             else:
                 target_id = str(target)
 
-            edge_id = relation.get("id", f"_e{i}")
-            edge_data = dict(relation)
-            edge_data["_source_id"] = source_id
-            edge_data["_target_id"] = target_id
-            edge_data["_rel_type"] = rel_type
+            if not source_id or not target_id:
+                continue
 
-            data_json = json.dumps(edge_data, ensure_ascii=False, default=str)
+            edge_data = {
+                k: v for k, v in relation.items()
+                if k not in ("source", "target", "startNode", "endNode")
+            }
+
             conn.execute(
-                """MERGE (e:Entity {id: $id})
-                   ON MATCH SET e.entity_type = 'edge', e.data = $data
-                   ON CREATE SET e.entity_type = 'edge', e.data = $data""",
-                parameters={"id": edge_id, "data": data_json},
+                "MATCH (s:Entity {id: $src}), (t:Entity {id: $dst}) "
+                "MERGE (s)-[r:Relates {relation_type: $rel_type}]->(t) "
+                "ON MATCH SET r.data = $data "
+                "ON CREATE SET r.data = $data",
+                parameters={
+                    "src": source_id,
+                    "dst": target_id,
+                    "rel_type": rel_type,
+                    "data": json.dumps(edge_data, ensure_ascii=False, default=str),
+                },
             )
 
-        # ── Simple types (model / list / set) — store as entities ──
+        # ── Simple types (model / list / set) ──
         items = data_dict.get("items", data_dict.get("fields", []))
         if isinstance(items, dict):
             items = [items]
@@ -1212,16 +1232,22 @@ def store_ka_in_subgraph(
             if not isinstance(item, dict):
                 continue
             item_id = item.get("name", item.get("id", str(i)))
-            data_json = json.dumps(item, ensure_ascii=False, default=str)
             conn.execute(
-                """MERGE (e:Entity {id: $id})
-                   ON MATCH SET e.entity_type = 'item', e.data = $data
-                   ON CREATE SET e.entity_type = 'item', e.data = $data""",
-                parameters={"id": item_id, "data": data_json},
+                "MERGE (e:Entity {id: $id}) "
+                "ON MATCH SET e.entity_type = 'item', e.data = $data "
+                "ON CREATE SET e.entity_type = 'item', e.data = $data",
+                parameters={
+                    "id": item_id,
+                    "data": json.dumps(item, ensure_ascii=False, default=str),
+                },
             )
 
-        logger.info("stored_ka_in_subgraph graph=%s entities=%d relations=%d",
-                     safe_name, len(entities), len(relations))
+        logger.info(
+            "stored_ka_in_subgraph graph=%s entities=%d relations=%d",
+            safe_name,
+            len(entities),
+            len(relations),
+        )
     finally:
         conn.close()
 
@@ -1229,37 +1255,26 @@ def store_ka_in_subgraph(
 def load_ka_from_subgraph(
     graph_name: str,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Load KA data from a dedicated LadybugDB subgraph.
+    """Load KA data from a subgraph's database file.
 
     Args:
-        graph_name: Subgraph name (same as passed to ``store_ka_in_subgraph``).
+        graph_name: Subgraph name (same as ``store_ka_in_subgraph``).
 
     Returns:
-        Tuple of ``(data_dict, metadata_dict)`` or ``(None, None)`` if the
-        subgraph does not exist or contains no data.
+        ``(data_dict, metadata_dict)`` or ``(None, None)``.
     """
     safe_name = _sanitize_graph_name(graph_name)
-    mgr = LadybugDBManager.get_instance()
 
-    # Check whether the subgraph exists
-    probe = lb.Connection(mgr.database)
-    try:
-        probe.execute(f"USE GRAPH {safe_name}")
-        probe.execute("MATCH (e:Entity) RETURN count(*) AS cnt")
-    except Exception:
-        probe.close()
-        return None, None
-    probe.close()
+    conn = _subgraph_conn(safe_name)
 
-    conn = _subgraph_connection(safe_name)
     try:
-        # Load metadata
+        _init_ka_schema(conn)
+
+        # ── Metadata ──
         metadata = None
         try:
-            result = conn.execute(
-                "MATCH (e:Entity {id: '_meta'}) RETURN e.data"
-            )
-            rows = result.get_all()
+            r = conn.execute("MATCH (e:Entity {id: '_meta'}) RETURN e.data")
+            rows = r.get_all()
             if rows:
                 raw = rows[0][0] if isinstance(rows[0], (list, tuple)) else rows[0]
                 if isinstance(raw, str):
@@ -1269,55 +1284,74 @@ def load_ka_from_subgraph(
         except Exception:
             pass
 
-        # Load all entities — separate nodes from edges by entity_type
-        result = conn.execute(
-            "MATCH (e:Entity) WHERE e.id <> '_meta' RETURN e.data, e.entity_type"
+        # ── Nodes ──
+        r = conn.execute(
+            "MATCH (e:Entity) WHERE e.id <> '_meta' AND e.entity_type <> 'item' "
+            "RETURN e.data, e.entity_type"
         )
-        rows = result.get_all()
-
         nodes = []
-        edge_rows = []
-        for row in rows:
-            if isinstance(row, (list, tuple)):
-                data_raw, etype = row[0], row[1]
-            elif isinstance(row, dict):
-                data_raw = row.get("e.data", row.get("data"))
-                etype = row.get("e.entity_type", row.get("entity_type"))
-            else:
-                continue
-
+        for row in r.get_all():
+            data_raw = row[0] if isinstance(row, (list, tuple)) else row.get("e.data", row.get("data"))
             if isinstance(data_raw, str):
                 try:
-                    data = json.loads(data_raw)
-                except (json.JSONDecodeError, ValueError):
-                    data = {"value": data_raw}
+                    nodes.append(json.loads(data_raw))
+                except json.JSONDecodeError:
+                    nodes.append({"value": data_raw})
             elif isinstance(data_raw, dict):
-                data = data_raw
-            else:
-                continue
+                nodes.append(data_raw)
 
-            if etype == "edge":
-                edge_rows.append(data)
-            else:
-                nodes.append(data)
-
-        # Rebuild relations from edge rows
+        # ── Edges from REL TABLE ──
+        r = conn.execute(
+            "MATCH (s:Entity)-[rel:Relates]->(t:Entity) "
+            "RETURN s.id AS src, t.id AS dst, rel.relation_type AS rtype, rel.data AS rdata"
+        )
         relations = []
-        for rdata in edge_rows:
-            src = rdata.pop("_source_id", rdata.get("source", ""))
-            dst = rdata.pop("_target_id", rdata.get("target", ""))
-            rel_type = rdata.pop("_rel_type", rdata.get("type", "related_to"))
+        for row in r.get_all():
+            if isinstance(row, (list, tuple)):
+                src, dst, rtype, rdata_raw = row[0], row[1], row[2], row[3]
+            else:
+                src = row.get("src", "")
+                dst = row.get("dst", "")
+                rtype = row.get("rtype", "")
+                rdata_raw = row.get("rdata", {})
+
+            if isinstance(rdata_raw, str):
+                try:
+                    rdata = json.loads(rdata_raw)
+                except (json.JSONDecodeError, ValueError):
+                    rdata = {}
+            elif isinstance(rdata_raw, dict):
+                rdata = rdata_raw
+            else:
+                rdata = {}
+
             rdata["source"] = src
             rdata["target"] = dst
-            rdata["type"] = rel_type
+            rdata["type"] = rtype
             relations.append(rdata)
 
-        # Build the data dict in the same shape as load_ka_from_db
+        # ── Items (list / set / model) ──
+        r = conn.execute(
+            "MATCH (e:Entity) WHERE e.entity_type = 'item' RETURN e.data"
+        )
+        items = []
+        for row in r.get_all():
+            data_raw = row[0] if isinstance(row, (list, tuple)) else row
+            if isinstance(data_raw, str):
+                try:
+                    items.append(json.loads(data_raw))
+                except json.JSONDecodeError:
+                    items.append({"value": data_raw})
+            elif isinstance(data_raw, dict):
+                items.append(data_raw)
+
+        # Build output in the same shape as load_ka_from_db
         if nodes and any(n.get("type") for n in nodes):
-            # Looks like typed entities → graph-shaped output
             data = {"nodes": nodes, "edges": relations}
+        elif items:
+            data = {"items": items}
         elif nodes:
-            data = {"items": nodes}
+            data = {"nodes": nodes, "edges": relations}
         else:
             data = {}
 
@@ -1328,11 +1362,11 @@ def load_ka_from_subgraph(
 
 
 def list_ka_subgraphs() -> List[str]:
-    """List all registered KA subgraphs in the main database.
+    """List registered subgraphs from the main DB catalog.
 
-    Uses ``show_graphs()`` which queries the catalog of the main
-    database — subgraphs are automatically registered there when
-    created via ``CREATE GRAPH``.
+    Uses ``CALL show_graphs()`` on a fresh connection to the main
+    database.  Subgraphs are registered by ``CREATE GRAPH`` inside
+    ``store_ka_in_subgraph()``.
 
     Returns:
         List of subgraph names.
@@ -1347,29 +1381,25 @@ def list_ka_subgraphs() -> List[str]:
 
 
 def delete_ka_subgraph(graph_name: str) -> bool:
-    """Drop a KA subgraph and all its data.
+    """Drop a subgraph from the main DB catalog.
+
+    ``DROP GRAPH`` removes both the catalog entry and the underlying
+    database file.
 
     Args:
         graph_name: Subgraph name.
 
     Returns:
-        ``True`` if the subgraph existed and was dropped.
+        ``True`` if the subgraph existed.
     """
     safe_name = _sanitize_graph_name(graph_name)
     mgr = LadybugDBManager.get_instance()
-
-    # Quick probe — if the graph doesn't exist, show_graphs won't list it
-    existing = list_ka_subgraphs()
-    if safe_name not in existing:
-        return False
-
     conn = lb.Connection(mgr.database)
     try:
         conn.execute(f"DROP GRAPH {safe_name}")
         logger.info("deleted_ka_subgraph graph=%s", safe_name)
         return True
-    except Exception as exc:
-        logger.warning("delete_ka_subgraph_failed graph=%s error=%s", safe_name, exc)
+    except Exception:
         return False
     finally:
         conn.close()
