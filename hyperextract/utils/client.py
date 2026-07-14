@@ -18,11 +18,35 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.globals import set_llm_cache
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_DIR = Path.home() / ".he"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.toml"
+
+# ── LLM response cache ──────────────────────────────────────────────
+# Enabled once on first LLM creation.  Caches exact prompt→response
+# pairs so that re-runs (e.g. after a parse error) don't burn tokens.
+_LLM_CACHE_ENABLED = False
+
+
+def _enable_llm_cache() -> None:
+    """Initialise the SQLite response cache (called once at startup)."""
+    global _LLM_CACHE_ENABLED
+    if _LLM_CACHE_ENABLED:
+        return
+    try:
+        from langchain_community.cache import SQLiteCache
+
+        cache_dir = DEFAULT_CONFIG_DIR / "llm_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        db_path = str(cache_dir / "responses.db")
+        set_llm_cache(SQLiteCache(database_path=db_path))
+        logger.debug("llm_cache_enabled path=%s", db_path)
+    except Exception as exc:
+        logger.warning("llm_cache_init_failed error=%s", exc)
+    _LLM_CACHE_ENABLED = True
 
 # Official OpenAI API base URL — only this endpoint accepts pre-tokenized input
 OPENAI_API_URL = "https://api.openai.com/v1"
@@ -58,6 +82,18 @@ PROVIDER_PRESETS: Dict[str, Dict[str, str | None]] = {
         "default_llm": "claude-opus-4-8",
         "default_embedder": None,
     },
+    # OpenCodeGo: local OpenAI-compatible server, requires explicit base_url.
+    "opencode-go": {
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "default_llm": "minimax-m3",
+        "default_embedder": None,
+    },
+    # OpenRouter: unified API gateway for many models.
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_llm": "deepseek/deepseek-v4-flash",
+        "default_embedder": None,
+    },
 }
 
 # Providers handled by the native langchain-anthropic client rather than the
@@ -68,6 +104,8 @@ ANTHROPIC_PROVIDERS = ("anthropic", "claude")
 PROVIDER_API_KEY_ENV: Dict[str, Tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
     "claude": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
+    "opencode-go": ("OPENCODE_GO_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
 }
 
 
@@ -325,6 +363,7 @@ def create_llm(
         >>> llm = create_llm("vllm:Qwen3.5-9B@localhost:8000/v1", api_key="dummy")
         >>> llm = create_llm({"provider": "bailian", "model": "qwen-plus", "temperature": 0.5})
     """
+    _enable_llm_cache()
     config = _parse_client_spec(spec, api_key=api_key, default_kind="llm")
     config.update(kwargs)
 
