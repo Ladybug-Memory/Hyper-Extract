@@ -1128,6 +1128,9 @@ def _init_ka_schema(conn: lb.Connection) -> None:
         """CREATE REL TABLE IF NOT EXISTS Relates (
             FROM Entity TO Entity,
             relation_type STRING,
+            time DATE,
+            space JSON,
+            confidence DOUBLE,
             data JSON
         )"""
     )
@@ -1208,18 +1211,54 @@ def store_ka_in_subgraph(
 
             edge_data = {
                 k: v for k, v in relation.items()
-                if k not in ("source", "target", "startNode", "endNode")
+                if k not in ("source", "target", "startNode", "endNode",
+                             "type", "time", "space", "confidence")
             }
+
+            # time: accept string or date; normalize to DATE
+            edge_date = None
+            raw_time = relation.get("time")
+            if raw_time:
+                # Accept YYYY-MM-DD, YYYY-MM, YYYY, or natural language
+                import re as _re
+                m = _re.match(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", str(raw_time))
+                if m:
+                    y, mo, d = m.group(1), m.group(2) or "01", m.group(3) or "01"
+                    edge_date = f"{y}-{mo}-{d}"
+
+            # space: JSON with lat/lng doubles and/or string location name
+            raw_space = relation.get("space", {})
+            if isinstance(raw_space, str):
+                # String location name — wrap in JSON
+                edge_space = json.dumps({"label": raw_space})
+            elif isinstance(raw_space, dict):
+                edge_space = json.dumps(raw_space, default=str)
+            else:
+                edge_space = "{}"
+
+            try:
+                edge_conf = (
+                    float(relation["confidence"])
+                    if relation.get("confidence") is not None
+                    else None
+                )
+            except (ValueError, TypeError):
+                edge_conf = None
 
             conn.execute(
                 "MATCH (s:Entity {id: $src}), (t:Entity {id: $dst}) "
                 "MERGE (s)-[r:Relates {relation_type: $rel_type}]->(t) "
-                "ON MATCH SET r.data = $data "
-                "ON CREATE SET r.data = $data",
+                "ON MATCH SET r.time = $time, r.space = $space, "
+                "  r.confidence = $confidence, r.data = $data "
+                "ON CREATE SET r.time = $time, r.space = $space, "
+                "  r.confidence = $confidence, r.data = $data",
                 parameters={
                     "src": source_id,
                     "dst": target_id,
                     "rel_type": rel_type,
+                    "time": edge_date,
+                    "space": edge_space,
+                    "confidence": edge_conf,
                     "data": json.dumps(edge_data, ensure_ascii=False, default=str),
                 },
             )
@@ -1303,16 +1342,23 @@ def load_ka_from_subgraph(
         # ── Edges from REL TABLE ──
         r = conn.execute(
             "MATCH (s:Entity)-[rel:Relates]->(t:Entity) "
-            "RETURN s.id AS src, t.id AS dst, rel.relation_type AS rtype, rel.data AS rdata"
+            "RETURN s.id AS src, t.id AS dst, rel.relation_type AS rtype, "
+            "       rel.time AS rtime, rel.space AS rspace, "
+            "       rel.confidence AS rconf, rel.data AS rdata"
         )
         relations = []
         for row in r.get_all():
             if isinstance(row, (list, tuple)):
-                src, dst, rtype, rdata_raw = row[0], row[1], row[2], row[3]
+                src, dst, rtype = row[0], row[1], row[2]
+                rtime, rspace, rconf = row[3], row[4], row[5]
+                rdata_raw = row[6]
             else:
                 src = row.get("src", "")
                 dst = row.get("dst", "")
                 rtype = row.get("rtype", "")
+                rtime = row.get("rtime", "")
+                rspace = row.get("rspace", "")
+                rconf = row.get("rconf")
                 rdata_raw = row.get("rdata", {})
 
             if isinstance(rdata_raw, str):
@@ -1325,9 +1371,25 @@ def load_ka_from_subgraph(
             else:
                 rdata = {}
 
+            # rtime comes back as a string (DATE → ISO format)
+            edge_time = str(rtime) if rtime is not None else rdata.get("time", "")
+            # rspace comes back as a JSON dict
+            if rspace is not None and isinstance(rspace, str):
+                try:
+                    edge_space = json.loads(rspace)
+                except (json.JSONDecodeError, ValueError):
+                    edge_space = {"label": rspace}
+            elif isinstance(rspace, dict):
+                edge_space = rspace
+            else:
+                edge_space = rdata.get("space", {})
+
             rdata["source"] = src
             rdata["target"] = dst
             rdata["type"] = rtype
+            rdata["time"] = edge_time
+            rdata["space"] = edge_space
+            rdata["confidence"] = rconf if rconf is not None else rdata.get("confidence")
             relations.append(rdata)
 
         # ── Items (list / set / model) ──
