@@ -1,6 +1,9 @@
-"""Config loader and template configuration models."""
+"""Config loader and template configuration models.
 
-import yaml
+Templates are now loaded from LadybugDB instead of YAML files.
+The legacy YAML files under templates/presets/ have been migrated to LadybugDB.
+"""
+
 from pathlib import Path
 from typing import Dict, List, Union
 from pydantic import BaseModel
@@ -21,9 +24,15 @@ from .schemas.graph import (
     GraphIdentifiersSchema,
 )
 
+# Import from LadybugDB manager for template operations
+from hyperextract.ladybug_db import (
+    get_template,
+    list_templates,
+)
+
 
 class TemplateCfg(BaseModel):
-    """Template configuration loaded from YAML."""
+    """Template configuration loaded from LadybugDB."""
 
     language: str | List[str] = "en"
     name: str
@@ -136,7 +145,7 @@ def localize_template(config: TemplateCfg, language: str) -> TemplateCfg:
         TemplateCfg: Single-language config with all multilingual fields converted to strings
 
     Examples:
-        >>> config = ConfigLoader.load_config("template.yaml")
+        >>> config = load_template_config("general/graph")
         >>> config_zh = localize_template(config, "zh")
         >>> print(config_zh.description)  # str
     """
@@ -155,14 +164,43 @@ def localize_template(config: TemplateCfg, language: str) -> TemplateCfg:
     )
 
 
-def load_template(file_path: Union[str, Path]) -> TemplateCfg:
-    """Load and validate template configuration."""
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {file_path}")
+def load_template_config(name: str) -> TemplateCfg:
+    """Load and validate template configuration from LadybugDB.
 
-    with open(path, "r", encoding="utf-8") as f:
-        template = TemplateCfg(**yaml.safe_load(f))
+    Args:
+        name: Template name (e.g., "general/graph" or "/path/to/template.yaml").
+
+    Returns:
+        TemplateCfg instance.
+
+    Raises:
+        FileNotFoundError: If template not found in LadybugDB.
+        ValueError: If template configuration is invalid.
+    """
+    # Support legacy file path loading for backward compatibility
+    if isinstance(name, (str, Path)) and (
+        str(name).endswith(".yaml") or Path(name).exists()
+    ):
+        # Legacy YAML loading path - deprecated but kept for transition
+        import yaml
+
+        path = Path(name)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {name}")
+
+        with open(path, "r", encoding="utf-8") as f:
+            template = TemplateCfg(**yaml.safe_load(f))
+    else:
+        # Load from LadybugDB
+        template_dict = get_template(name)
+        if template_dict is None:
+            raise FileNotFoundError(
+                f"Template '{name}' not found in LadybugDB. "
+                f"Run migration script to load templates."
+            )
+
+        # Convert dict to TemplateCfg
+        template = _template_dict_to_cfg(template_dict)
 
     # Validate and localize the template for each language
     existing_languages = (
@@ -181,8 +219,140 @@ def load_template(file_path: Union[str, Path]) -> TemplateCfg:
     return template
 
 
+def load_template(file_path: Union[str, Path]) -> TemplateCfg:
+    """Load and validate template configuration (legacy YAML path).
+
+    Deprecated: Use load_template_config() instead.
+    Kept for backward compatibility.
+
+    Args:
+        file_path: Path to YAML file.
+
+    Returns:
+        TemplateCfg instance.
+    """
+    return load_template_config(file_path)
+
+
+def list_template_configs(
+    filter_by_type: str = None,
+    filter_by_tag: str = None,
+    filter_by_query: str = None,
+    filter_by_language: str = None,
+) -> Dict[str, "TemplateCfg"]:
+    """List template configurations with optional filters.
+
+    Args:
+        filter_by_type: Filter by autotype (e.g., "graph", "list", "model")
+        filter_by_tag: Filter by tag
+        filter_by_query: Search in template name/description
+        filter_by_language: Filter by language (e.g., "zh", "en")
+
+    Returns:
+        Dict mapping template name to TemplateCfg
+    """
+    templates_dict = list_templates(
+        filter_by_type=filter_by_type,
+        filter_by_tag=filter_by_tag,
+        filter_by_query=filter_by_query,
+        filter_by_language=filter_by_language,
+    )
+
+    result = {}
+    for name, tdict in templates_dict.items():
+        try:
+            cfg = _template_dict_to_cfg(tdict)
+            result[name] = cfg
+        except Exception as e:
+            print(f"Failed to convert template '{name}': {e}")
+
+    return result
+
+
+def _template_dict_to_cfg(data: dict) -> TemplateCfg:
+    """Convert a template dict from LadybugDB to a TemplateCfg instance.
+
+    Args:
+        data: Template data dict retrieved from LadybugDB.
+
+    Returns:
+        TemplateCfg instance.
+    """
+    # The data dict may have keys like "name", "domain", "type", "tags",
+    # "description", "language", "output", "guideline", "identifiers",
+    # "options", "display". Also may include "_key".
+
+    cfg_data = {}
+
+    # Basic fields
+    cfg_data["name"] = data.get("name", "unknown")
+    if "/" in cfg_data["name"]:
+        cfg_data["name"] = cfg_data["name"].split("/", 1)[1]
+
+    cfg_data["type"] = data.get("type", "graph")
+    cfg_data["tags"] = data.get("tags", [])
+
+    # Description can be a string or dict
+    desc = data.get("description", "")
+    cfg_data["description"] = desc
+
+    # Language
+    lang = data.get("language", "en")
+    cfg_data["language"] = lang
+
+    # Parse output - needs to match the schema structure
+    output_raw = data.get("output", {})
+    if isinstance(output_raw, str):
+        output_raw = _safe_json_load(output_raw, {})
+    cfg_data["output"] = output_raw
+
+    # Parse guideline
+    guideline_raw = data.get("guideline", {})
+    if isinstance(guideline_raw, str):
+        guideline_raw = _safe_json_load(guideline_raw, {})
+    cfg_data["guideline"] = guideline_raw
+
+    # Parse identifiers (optional)
+    identifiers_raw = data.get("identifiers")
+    if identifiers_raw is not None:
+        if isinstance(identifiers_raw, str):
+            identifiers_raw = _safe_json_load(identifiers_raw, {})
+        # Only set if non-empty
+        if identifiers_raw:
+            cfg_data["identifiers"] = identifiers_raw
+
+    # Parse options (optional)
+    options_raw = data.get("options")
+    if options_raw is not None:
+        if isinstance(options_raw, str):
+            options_raw = _safe_json_load(options_raw, {})
+        if options_raw:
+            cfg_data["options"] = options_raw
+
+    # Parse display (optional)
+    display_raw = data.get("display")
+    if display_raw is not None:
+        if isinstance(display_raw, str):
+            display_raw = _safe_json_load(display_raw, {})
+        if display_raw:
+            cfg_data["display"] = display_raw
+
+    return TemplateCfg(**cfg_data)
+
+
+def _safe_json_load(value: str, default=None):
+    """Safely parse a JSON string."""
+    import json
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return default if default is not None else value
+
+
 __all__ = [
     "TemplateCfg",
     "load_template",
+    "load_template_config",
     "localize_template",
+    "list_template_configs",
 ]

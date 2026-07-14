@@ -514,9 +514,13 @@ class BaseAutoType(ABC, Generic[T]):
     # ==================== Serialization: Orchestrator ====================
 
     def dump(self, folder_path: str | Path) -> None:
-        """Saves the entire knowledge abstract (data, metadata, index) to a directory.
+        """Saves the entire knowledge abstract to a directory and LadybugDB.
 
-        This is the main entry point for serialization. It creates a directory structure:
+        Data is stored in both:
+        1. LadybugDB (primary storage - graph database)
+        2. Filesystem directory (backward compatibility: data.json, metadata.json, index/)
+
+        Directory structure:
             /folder_path
               |-- data.json       (The structured knowledge data)
               |-- metadata.json   (Metadata, localized config, timestamps)
@@ -528,10 +532,30 @@ class BaseAutoType(ABC, Generic[T]):
         root = Path(folder_path)
         root.mkdir(parents=True, exist_ok=True)
 
-        # 1. Save Core Data
+        # 0. Save to LadybugDB (primary storage)
+        try:
+            from hyperextract.ladybug_db import store_ka_from_path
+
+            template_name = self.metadata.get("template", "unknown")
+            lang = self.metadata.get("lang", "en")
+            type_ = self.metadata.get("type", "graph")
+            data_dict = self.data.model_dump() if hasattr(self.data, 'model_dump') else {}
+
+            store_ka_from_path(
+                ka_path=str(root),
+                template_name=template_name,
+                lang=lang,
+                type_=type_,
+                data_dict=data_dict,
+                metadata=dict(self.metadata),
+            )
+        except Exception as e:
+            print(f"Warning: Failed to save to LadybugDB: {e}")
+
+        # 1. Save Core Data (filesystem fallback)
         self.dump_data(root / "data.json")
 
-        # 2. Save Metadata
+        # 2. Save Metadata (filesystem fallback)
         self.dump_metadata(root / "metadata.json")
 
         # 3. Save Index (Sub-folder)
@@ -547,7 +571,11 @@ class BaseAutoType(ABC, Generic[T]):
             print(f"Warning: Failed to save vector index: {e}")
 
     def load(self, folder_path: str | Path) -> None:
-        """Loads the entire knowledge abstract from a directory.
+        """Loads the entire knowledge abstract from LadybugDB or directory.
+
+        Load priority:
+        1. LadybugDB (if KA data exists in database)
+        2. Filesystem (backward compatibility: data.json, metadata.json, index/)
 
         Args:
             folder_path: Source directory path.
@@ -556,15 +584,45 @@ class BaseAutoType(ABC, Generic[T]):
         if not root.exists():
             raise FileNotFoundError(f"Knowledge abstract directory not found: {root}")
 
-        # 1. Load Core Data (Critical)
-        self.load_data(root / "data.json")
+        # 0. Try LadybugDB first (primary storage)
+        loaded_from_db = False
+        try:
+            from hyperextract.ladybug_db import load_ka_from_db
 
-        # 2. Load Metadata (Optional but recommended)
-        meta_path = root / "metadata.json"
-        if meta_path.exists():
-            self.load_metadata(meta_path)
+            type_ = self.metadata.get("type", "graph")
+            data_dict, meta_dict = load_ka_from_db(str(root), type_)
 
-        # 3. Load Index (Optional)
+            if data_dict is not None:
+                # Validate data against schema and set state
+                validated_data = self._data_schema.model_validate(data_dict)
+                self._set_data_state(validated_data)
+
+                # Update metadata
+                if meta_dict:
+                    for key in ("created_at", "updated_at"):
+                        value = meta_dict.get(key)
+                        if isinstance(value, str):
+                            try:
+                                meta_dict[key] = datetime.fromisoformat(value)
+                            except ValueError:
+                                pass
+                    self.metadata.update(meta_dict)
+
+                loaded_from_db = True
+                logger.debug("Loaded Knowledge Abstract from LadybugDB: %s", root)
+        except Exception as e:
+            logger.debug("Could not load from LadybugDB, falling back to filesystem: %s", e)
+
+        if not loaded_from_db:
+            # 1. Load Core Data from filesystem (Critical)
+            self.load_data(root / "data.json")
+
+            # 2. Load Metadata from filesystem (Optional but recommended)
+            meta_path = root / "metadata.json"
+            if meta_path.exists():
+                self.load_metadata(meta_path)
+
+        # 3. Load Index (Optional always from filesystem)
         index_path = root / "index"
         if index_path.exists() and any(index_path.iterdir()):
             try:

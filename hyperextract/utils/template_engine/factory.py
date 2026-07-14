@@ -12,6 +12,7 @@ from langchain_core.embeddings import Embeddings
 from .parsers import (
     TemplateCfg,
     localize_template,
+    load_template_config,
     parse_output,
     parse_identifiers,
     parse_guideline,
@@ -448,11 +449,10 @@ class TemplateFactory:
             )
 
         from .gallery import Gallery
-        from .parsers import load_template
 
         match source:
             case str() as s if s.endswith(".yaml") or Path(s).exists():
-                template_cfg = load_template(s)
+                template_cfg = load_template_config(s)
             case str() as s:
                 template_cfg = Gallery.get(s)
             case TemplateCfg() as cfg:

@@ -3,6 +3,8 @@
 from .loader import (
     TemplateCfg,
     load_template,
+    load_template_config,
+    list_template_configs,
     localize_template,
 )
 from .output import parse_output
@@ -15,6 +17,8 @@ from .display import parse_display
 __all__ = [
     "TemplateCfg",
     "load_template",
+    "load_template_config",
+    "list_template_configs",
     "localize_template",
     "parse_output",
     "parse_guideline",

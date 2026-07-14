@@ -1,16 +1,20 @@
 """Template Gallery - Manages discovery and loading of knowledge extraction templates.
 
-Auto-loads templates from presets directory.
+Templates are now loaded from LadybugDB instead of YAML files.
+The legacy presets directory is still checked for migration purposes.
 """
 
 from pathlib import Path
 from typing import Dict, Optional
 
-from .parsers import TemplateCfg, load_template
+from .parsers import TemplateCfg, load_template_config, list_template_configs
 
 
 class Gallery:
     """Template Gallery.
+
+    Templates are stored in LadybugDB and loaded on demand.
+    Legacy YAML file loading is deprecated.
 
     Usage Examples:
         from hyperextract.utils.template_engine import Gallery
@@ -45,10 +49,22 @@ class Gallery:
         Returns:
             TemplateCfg or None if not found
         """
-        if "/" in path:
-            return cls._instance._configs.get(path)
+        # First check in-memory cache
+        if cls._instance:
+            if "/" in path:
+                config = cls._instance._configs.get(path)
+                if config:
+                    return config
+            else:
+                config = cls._instance._configs.get(f"general/{path}")
+                if config:
+                    return config
 
-        return cls._instance._configs.get(f"general/{path}")
+        # Fall back to direct LadybugDB lookup
+        try:
+            return load_template_config(path)
+        except (FileNotFoundError, Exception):
+            return None
 
     @classmethod
     def list(
@@ -69,56 +85,32 @@ class Gallery:
         Returns:
             Dict mapping template name to TemplateCfg
         """
-        if not cls._instance:
-            return {}
+        # Load from LadybugDB with filters
+        return list_template_configs(
+            filter_by_type=filter_by_type,
+            filter_by_tag=filter_by_tag,
+            filter_by_query=filter_by_query,
+            filter_by_language=filter_by_language,
+        )
 
-        results = {}
-        for key, config in cls._instance._configs.items():
-            q = filter_by_query.lower() if filter_by_query else None
-
-            if q and q not in config.name.lower():
-                desc = config.description
-                if isinstance(desc, str) and q not in desc.lower():
-                    continue
-                if isinstance(desc, dict) and not any(
-                    q in v.lower() for v in desc.values()
-                ):
-                    continue
-
-            if filter_by_type and config.type != filter_by_type:
-                continue
-            if filter_by_tag and (not config.tags or filter_by_tag not in config.tags):
-                continue
-            if filter_by_language:
-                config_lang = config.language
-                if isinstance(config_lang, list):
-                    if filter_by_language not in config_lang:
-                        continue
-                elif config_lang != filter_by_language:
-                    continue
-            results[key] = config
-
-        return results
-
-    def _load_config(self, file_path: Path, presets_dir: Path) -> None:
-        try:
-            config = load_template(file_path)
-            domain = file_path.parent.relative_to(presets_dir).parts[0]
-            key = f"{domain}/{config.name}"
-            self._configs[key] = config
-        except Exception as e:
-            print(f"Failed to load config {file_path}: {e}")
+    @classmethod
+    def refresh(cls) -> None:
+        """Refresh the gallery cache from LadybugDB."""
+        if cls._instance:
+            cls._instance._configs = list_template_configs()
 
 
 def _init_gallery() -> Gallery:
+    """Initialize the gallery by loading templates from LadybugDB."""
     gallery = Gallery()
     Gallery._instance = gallery
 
-    presets_dir = Path(__file__).parent.parent.parent / "templates" / "presets"
-
-    if presets_dir.exists():
-        for file_path in presets_dir.rglob("*.yaml"):
-            gallery._load_config(file_path, presets_dir)
+    # Load templates from LadybugDB into cache
+    try:
+        gallery._configs = list_template_configs()
+    except Exception as e:
+        print(f"Warning: Could not load templates from LadybugDB: {e}")
+        print("Run the migration script to populate the database.")
 
     return gallery
 
