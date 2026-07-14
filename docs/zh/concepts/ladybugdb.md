@@ -291,10 +291,88 @@ rm -f ~/.hyperextract/he.lbdb*
 
 下次运行时将重新创建空数据库。模板需要重新迁移。
 
-### 迁移模板
+### 模板管理
 
-模板在首次使用时从 YAML 文件加载。要显式填充数据库：
+提取模板（`hyperextract/templates/presets/` 中的 YAML 文件）存储在 LadybugDB 中，无需文件系统即可查询和加载。
+
+#### 首次使用自动加载
+
+当您运行 `he list template` 或 `he parse -t <template>` 时，系统会先检查 LadybugDB。如果数据库为空，您将看到：
+
+```
+Warning: Could not load templates from LadybugDB: ...
+Run the migration script to populate the database.
+```
+
+#### 迁移模板到 LadybugDB
+
+将所有内置模板填充到 LadybugDB：
 
 ```bash
 uv run python -m hyperextract.scripts.migrate_templates
+```
+
+此命令扫描 `hyperextract/templates/presets/` 中的每个 `*.yaml` 文件，将其转换为 LadybugDB 记录，并验证结果：
+
+```
+  ✓ general/graph (graph.yaml)
+  ✓ general/biography_graph (biography_graph.yaml)
+  ✓ general/list (list.yaml)
+  ...
+
+Migrated 24 templates to LadybugDB
+
+Verifying...
+Found 24 templates in LadybugDB:
+  - general/biography_graph
+  - general/graph
+  - general/list
+  - ...
+```
+
+#### 列出模板
+
+`he list template` 命令从 LadybugDB 读取并支持筛选：
+
+```bash
+# 列出所有模板
+he list template
+
+# 按类型筛选
+he list template --autotype graph
+
+# 按关键词搜索
+he list template --query biography
+
+# 按语言筛选
+he list template --lang en
+he list template --lang all
+```
+
+#### 编程方式访问
+
+```python
+from hyperextract.ladybug_db import (
+    store_template,
+    get_template,
+    list_templates,
+    delete_template,
+)
+
+# 列出所有
+all_tmpl = list_templates()
+
+# 获取单个
+cfg = get_template("general/biography_graph")
+
+# 存储自定义模板（从字典）
+store_template({
+    "name": "my_custom_template",
+    "domain": "custom",
+    "type": "graph",
+    ...
+})
+
+# 删除
+delete_template("custom/my_custom_template")
 ```

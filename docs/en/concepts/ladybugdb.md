@@ -291,10 +291,88 @@ rm -f ~/.hyperextract/he.lbdb*
 
 The database will be recreated empty on the next run. Templates will need to be re-migrated.
 
-### Migrating Templates
+### Template Management
 
-Templates are loaded from YAML files on first use. To explicitly populate the database:
+Extraction templates (the YAML files in `hyperextract/templates/presets/`) are stored in LadybugDB so they can be queried and loaded without filesystem access.
+
+#### Automatic Loading on First Use
+
+When you run `he list template` or `he parse -t <template>`, the system checks LadybugDB first. If the database is empty, you'll see:
+
+```
+Warning: Could not load templates from LadybugDB: ...
+Run the migration script to populate the database.
+```
+
+#### Migrating Templates to LadybugDB
+
+Populate LadybugDB with all built-in templates:
 
 ```bash
 uv run python -m hyperextract.scripts.migrate_templates
+```
+
+This scans `hyperextract/templates/presets/` for every `*.yaml` file, converts them to LadybugDB records, and verifies the result:
+
+```
+  ✓ general/graph (graph.yaml)
+  ✓ general/biography_graph (biography_graph.yaml)
+  ✓ general/list (list.yaml)
+  ...
+
+Migrated 24 templates to LadybugDB
+
+Verifying...
+Found 24 templates in LadybugDB:
+  - general/biography_graph
+  - general/graph
+  - general/list
+  - ...
+```
+
+#### Listing Templates
+
+The `he list template` command reads from LadybugDB and supports filtering:
+
+```bash
+# List all templates
+he list template
+
+# Filter by type
+he list template --autotype graph
+
+# Search by keyword
+he list template --query biography
+
+# Filter by language
+he list template --lang en
+he list template --lang all
+```
+
+#### Programmatic Access
+
+```python
+from hyperextract.ladybug_db import (
+    store_template,
+    get_template,
+    list_templates,
+    delete_template,
+)
+
+# List all
+all_tmpl = list_templates()
+
+# Get one
+cfg = get_template("general/biography_graph")
+
+# Store a custom template (from a dict)
+store_template({
+    "name": "my_custom_template",
+    "domain": "custom",
+    "type": "graph",
+    ...
+})
+
+# Delete
+delete_template("custom/my_custom_template")
 ```
