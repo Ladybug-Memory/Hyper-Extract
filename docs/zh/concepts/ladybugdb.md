@@ -85,14 +85,43 @@ he parse examples/zh/tesla.md -o ./output --lang zh --db tesla_bio
 
 内部执行 `CREATE GRAPH tesla_bio; USE GRAPH tesla_bio;`，然后创建模式并将所有数据插入该子图。
 
+**每个子图是一个单独的 LadybugDB 数据库文件** — `he.<名称>.lbdb` — 在主 `he.lbdb` 的目录中注册。使用 `show_graphs()` 列出它们。
+
 必须提供 `--output` / `-o`（文件系统目录）或 `--db`（子图名称）中的至少一个。两者也可以同时使用。
 
 | 功能 | 平面模式（`-o <目录>`） | 子图（`--db <名称>`） |
 |------|------------------------|----------------------|
+| 文件 | `he.lbdb`（共享） | `he.<名称>.lbdb`（独立） |
 | 表结构 | 所有 KA 共享 | 每 KA 隔离 |
-| 查询隔离 | 按 `ka_id` 过滤 | 完整命名空间隔离 |
 | 删除 | 按 `ka_id` 删除行 | `DROP GRAPH <名称>`（即时） |
-| 列出 | `MATCH (ka:KnowledgeAbstract)` | 通过 `USE GRAPH` 逐连接 |
+| 列出 | `MATCH (ka:KnowledgeAbstract)` | `CALL show_graphs()` 或 `list_ka_subgraphs()` |
+
+### 列出和删除子图
+
+```python
+from hyperextract.ladybug_db import list_ka_subgraphs, delete_ka_subgraph
+
+# 列出主数据库中注册的所有子图
+subgraphs = list_ka_subgraphs()
+print(subgraphs)  # 例如 ["tesla_bio", "my_other_ka"]
+
+# 删除子图（删除文件和目录条目）
+delete_ka_subgraph("tesla_bio")
+```
+
+### 子图内部存储布局
+
+```
+文件: he.tesla_bio.lbdb
+└── Entity (NODE TABLE)
+    ├── {id: "尼古拉·特斯拉", entity_type: "person",    data: {name: "尼古拉·特斯拉", ...}}
+    ├── {id: "交流电机",       entity_type: "invention", data: {name: "交流电机", ...}}
+    ├── {id: "_e0",            entity_type: "edge",      data: {_source_id: "尼古拉·特斯拉", _target_id: "交流电机", ...}}
+    ├── {id: "_e1",            entity_type: "edge",      data: {...}}
+    └── {id: "_meta",          entity_type: "metadata",  data: {template: "...", lang: "zh"}}
+```
+
+边存储为 `entity_type='edge'` 的 `Entity` 行，因为 LadybugDB 的 `REL TABLE` 与其子图实现无法正常配合使用。
 
 ### 编程方式访问子图
 
@@ -100,6 +129,7 @@ he parse examples/zh/tesla.md -o ./output --lang zh --db tesla_bio
 from hyperextract.ladybug_db import (
     store_ka_in_subgraph,
     load_ka_from_subgraph,
+    list_ka_subgraphs,
     delete_ka_subgraph,
 )
 
@@ -114,19 +144,12 @@ store_ka_in_subgraph(
 data, meta = load_ka_from_subgraph("tesla_bio")
 print(f"{len(data['nodes'])} 个节点, {len(data['edges'])} 条边")
 
+# 列出所有注册的子图
+all_sgs = list_ka_subgraphs()
+print(all_sgs)  # 例如 ["tesla_bio", ...]
+
 # 删除
 delete_ka_subgraph("tesla_bio")
-```
-
-**子图内部存储布局：**
-
-```
-图: tesla_bio
-├── Entity {id: "尼古拉·特斯拉", entity_type: "person", data: {...}}
-├── Entity {id: "交流电机",       entity_type: "invention", data: {...}}
-├── Entity {id: "_e0",            entity_type: "edge", data: {_source_id, _target_id, ...}}
-├── Entity {id: "_e1",            entity_type: "edge", data: {...}}
-└── Entity {id: "_meta",          entity_type: "metadata", data: {...}}
 ```
 
 边存储为 `entity_type='edge'` 的 `Entity` 行，因为 LadybugDB 的 `REL TABLE` 在子图内部无法正常工作。

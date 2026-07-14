@@ -85,14 +85,43 @@ he parse examples/en/tesla.md -o ./output --lang en --db tesla_bio
 
 This runs `CREATE GRAPH tesla_bio; USE GRAPH tesla_bio;` internally, then creates the schema and inserts all data inside that subgraph.
 
+**Each subgraph is a separate LadybugDB database file** — `he.<name>.lbdb` — registered in the catalog of the main `he.lbdb`. Use `show_graphs()` to list them.
+
 Either `--output` / `-o` (filesystem directory) or `--db` (subgraph name) must be provided. They can also be used together.
 
 | Feature | Flat Schema (`-o <dir>`) | Subgraph (`--db <name>`) |
 |---------|--------------------------|--------------------------|
+| File | `he.lbdb` (shared) | `he.<name>.lbdb` (separate) |
 | Tables | Shared across all KAs | Isolated per KA |
-| Query isolation | Filter by `ka_id` | Full namespace isolation |
 | Deletion | Delete rows by `ka_id` | `DROP GRAPH <name>` (instant) |
-| Listing | `MATCH (ka:KnowledgeAbstract)` | Per-connection via `USE GRAPH` |
+| Listing | `MATCH (ka:KnowledgeAbstract)` | `CALL show_graphs()` or `list_ka_subgraphs()` |
+
+### Listing and Deleting Subgraphs
+
+```python
+from hyperextract.ladybug_db import list_ka_subgraphs, delete_ka_subgraph
+
+# List all subgraphs registered in the main database
+subgraphs = list_ka_subgraphs()
+print(subgraphs)  # e.g. ["tesla_bio", "my_other_ka"]
+
+# Delete a subgraph (drops the file and catalog entry)
+delete_ka_subgraph("tesla_bio")
+```
+
+### Storage Layout Inside a Subgraph
+
+```
+File: he.tesla_bio.lbdb
+└── Entity (NODE TABLE)
+    ├── {id: "Nikola Tesla", entity_type: "person",    data: {name: "Nikola Tesla", ...}}
+    ├── {id: "AC motor",     entity_type: "invention", data: {name: "AC motor", ...}}
+    ├── {id: "_e0",          entity_type: "edge",      data: {_source_id: "Nikola Tesla", _target_id: "AC motor", ...}}
+    ├── {id: "_e1",          entity_type: "edge",      data: {...}}
+    └── {id: "_meta",        entity_type: "metadata",  data: {template: "...", lang: "en"}}
+```
+
+Edges are stored as `Entity` rows with `entity_type='edge'` because LadybugDB's `REL TABLE` does not interoperate correctly with its subgraph implementation.
 
 ### Programmatic subgraph access
 
@@ -100,6 +129,7 @@ Either `--output` / `-o` (filesystem directory) or `--db` (subgraph name) must b
 from hyperextract.ladybug_db import (
     store_ka_in_subgraph,
     load_ka_from_subgraph,
+    list_ka_subgraphs,
     delete_ka_subgraph,
 )
 
@@ -114,19 +144,12 @@ store_ka_in_subgraph(
 data, meta = load_ka_from_subgraph("tesla_bio")
 print(f"{len(data['nodes'])} nodes, {len(data['edges'])} edges")
 
+# List all registered subgraphs
+all_sgs = list_ka_subgraphs()
+print(all_sgs)  # e.g. ["tesla_bio", ...]
+
 # Delete
 delete_ka_subgraph("tesla_bio")
-```
-
-**Storage layout inside a subgraph:**
-
-```
-Graph: tesla_bio
-├── Entity {id: "Nikola Tesla", entity_type: "person", data: {...}}
-├── Entity {id: "AC motor",     entity_type: "invention", data: {...}}
-├── Entity {id: "_e0",          entity_type: "edge", data: {_source_id, _target_id, ...}}
-├── Entity {id: "_e1",          entity_type: "edge", data: {...}}
-└── Entity {id: "_meta",        entity_type: "metadata", data: {...}}
 ```
 
 Edges are stored as `Entity` rows with `entity_type='edge'` because LadybugDB's `REL TABLE` does not work correctly inside subgraphs.
