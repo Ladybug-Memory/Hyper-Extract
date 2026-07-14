@@ -222,7 +222,9 @@ def parse(
     input: str = typer.Argument(
         ..., help="Input file path, directory, or '-' for stdin"
     ),
-    output: str = typer.Option(..., "--output", "-o", help="Output directory"),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Output directory (required unless --db is set)"
+    ),
     template: Optional[str] = typer.Option(
         None, "--template", "-t", help="Template (omit for interactive selection)"
     ),
@@ -239,15 +241,32 @@ def parse(
     no_index: bool = typer.Option(
         False, "--no-index", help="Skip building search index"
     ),
+    db: Optional[str] = typer.Option(
+        None,
+        "--db",
+        help="Save to a LadybugDB subgraph instead of a directory (value = graph name)",
+    ),
 ):
-    """Extract knowledge from text to a new directory."""
+    """Extract knowledge from text to a new directory or LadybugDB subgraph.
+
+    At least one of --output / -o or --db must be provided.
+    """
     logger.info(
-        "command=parse input=%s output=%s template=%s lang=%s",
+        "command=parse input=%s output=%s db=%s template=%s lang=%s",
         input,
         output,
+        db,
         template or "auto",
         lang or "auto",
     )
+
+    if not output and not db:
+        console.print(
+            "[red]Error:[/red] Either --output / -o (filesystem directory) or "
+            "--db (LadybugDB subgraph) must be provided."
+        )
+        raise typer.Exit(1)
+
     validate_config()
     logger.info("stage=config_validated")
 
@@ -273,22 +292,24 @@ def parse(
         )
         raise typer.Exit(1)
 
-    output_path = Path(output)
+    if output:
+        output_path = Path(output)
+        if output_path.exists() and not force:
+            if any(output_path.iterdir()):
+                console.print(
+                    "[red]Error:[/red] Output directory already exists and is not empty. "
+                    "Use --force to overwrite."
+                )
+                raise typer.Exit(1)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-    if output_path.exists() and not force:
-        if any(output_path.iterdir()):
-            console.print(
-                "[red]Error:[/red] Output directory already exists and is not empty. Use --force to overwrite."
-            )
-            raise typer.Exit(1)
-
-    output_path.mkdir(parents=True, exist_ok=True)
-
+    dest_desc = f"LadybugDB subgraph '{db}'" if db else output
     console.print(f"[blue]Input:[/blue] {input}")
-    console.print(f"[blue]Output:[/blue] {output}")
+    console.print(f"[blue]Destination:[/blue] {dest_desc}")
     console.print(f"[blue]Template:[/blue] {template}")
     console.print(f"[blue]Language:[/blue] {lang}")
-    console.print(f"[blue]Build Index:[/blue] {'No' if no_index else 'Yes'}")
+    if output:
+        console.print(f"[blue]Build Index:[/blue] {'No' if no_index else 'Yes'}")
     console.print()
 
     try:
@@ -347,21 +368,39 @@ def parse(
 
         progress.update(task, description="Saving data...")
 
-        template_config = Template.get(template)
-        if template_config is None:
-            if template.endswith(".yaml"):
-                import shutil
+        # Save to LadybugDB subgraph (--db) and/or filesystem (-o)
+        data_dict = (
+            ka.data.model_dump()
+            if hasattr(ka.data, "model_dump")
+            else {}
+        )
 
-                filename = Path(template).name
-                shutil.copy(template, output_path / filename)
-                console.print(
-                    f"[dim]Custom template '{filename}' saved to KA directory[/dim]"
-                )
+        if output:
+            template_config = Template.get(template)
+            if template_config is None:
+                if template.endswith(".yaml"):
+                    import shutil
 
-        ka.dump(output_path)
-        logger.info("stage=data_saved output=%s", output_path)
+                    filename = Path(template).name
+                    shutil.copy(template, output_path / filename)
+                    console.print(
+                        f"[dim]Custom template '{filename}' saved to KA directory[/dim]"
+                    )
 
-        if not no_index:
+            ka.dump(output_path)
+            logger.info("stage=data_saved output=%s", output_path)
+
+        if db:
+            from hyperextract.ladybug_db import store_ka_in_subgraph
+
+            store_ka_in_subgraph(
+                graph_name=db,
+                data_dict=data_dict,
+                metadata=dict(ka.metadata),
+            )
+            logger.info("stage=subgraph_saved graph=%s", db)
+
+        if output and not no_index:
             progress.update(task, description="Building search index...")
             ka.build_index()
             console.print("[dim]Index built successfully[/dim]")
@@ -372,34 +411,35 @@ def parse(
 
     console.print()
     console.print(
-        f"[bold green]Success![/bold green] Knowledge extracted to {output_path}"
+        f"[bold green]Success![/bold green] Knowledge extracted to {dest_desc}"
     )
     console.print()
-    if no_index:
-        console.print("[dim]Note: Index was not built.[/dim]")
-        console.print(
-            f"[dim]  he build-index {output}       # Build index to enable search/talk[/dim]"
-        )
-        console.print(
-            f"[dim]  he feed {output} <new_document>  # Append more documents[/dim]"
-        )
-    else:
-        console.print("[dim]What's next?[/dim]")
-        console.print(
-            f"[dim]  he show {output}                    # Visualize knowledge graph[/dim]"
-        )
-        console.print(
-            f"[dim]  he feed {output} <new_document>     # Append more documents[/dim]"
-        )
-        console.print(
-            f'[dim]  he search {output} "keyword"        # Semantic search[/dim]'
-        )
-        console.print(
-            f"[dim]  he talk {output} -i                 # Interactive chat[/dim]"
-        )
-        console.print(
-            f'[dim]  he talk {output} -q "your question" # Single query[/dim]'
-        )
+    if output:
+        if no_index:
+            console.print("[dim]Note: Index was not built.[/dim]")
+            console.print(
+                f"[dim]  he build-index {output}       # Build index to enable search/talk[/dim]"
+            )
+            console.print(
+                f"[dim]  he feed {output} <new_document>  # Append more documents[/dim]"
+            )
+        else:
+            console.print("[dim]What's next?[/dim]")
+            console.print(
+                f"[dim]  he show {output}                    # Visualize knowledge graph[/dim]"
+            )
+            console.print(
+                f"[dim]  he feed {output} <new_document>     # Append more documents[/dim]"
+            )
+            console.print(
+                f'[dim]  he search {output} "keyword"        # Semantic search[/dim]'
+            )
+            console.print(
+                f"[dim]  he talk {output} -i                 # Interactive chat[/dim]"
+            )
+            console.print(
+                f'[dim]  he talk {output} -q "your question" # Single query[/dim]'
+            )
 
 
 @app.command(name="show")

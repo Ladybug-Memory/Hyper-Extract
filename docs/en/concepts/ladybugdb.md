@@ -76,14 +76,19 @@ No configuration required. The database lives at `~/.hyperextract/he.lbdb` by de
 Beyond the flat schema above, each KA can also be stored in its own **isolated LadybugDB subgraph**. This gives each extraction its own namespace with no shared tables.
 
 ```bash
-he parse examples/en/tesla.md -o ./output --lang en \
-  --db tesla_bio
+# Save to a LadybugDB subgraph (no filesystem directory needed)
+he parse examples/en/tesla.md -t general/biography_graph --lang en --db tesla_bio
+
+# Save to both
+he parse examples/en/tesla.md -o ./output --lang en --db tesla_bio
 ```
 
 This runs `CREATE GRAPH tesla_bio; USE GRAPH tesla_bio;` internally, then creates the schema and inserts all data inside that subgraph.
 
-| Feature | Flat Schema (default) | Subgraph (`--db <name>`) |
-|---------|----------------------|--------------------------|
+Either `--output` / `-o` (filesystem directory) or `--db` (subgraph name) must be provided. They can also be used together.
+
+| Feature | Flat Schema (`-o <dir>`) | Subgraph (`--db <name>`) |
+|---------|--------------------------|--------------------------|
 | Tables | Shared across all KAs | Isolated per KA |
 | Query isolation | Filter by `ka_id` | Full namespace isolation |
 | Deletion | Delete rows by `ka_id` | `DROP GRAPH <name>` (instant) |

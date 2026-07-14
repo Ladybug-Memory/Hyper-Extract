@@ -76,14 +76,19 @@ he talk ./output -q "特斯拉发明了什么？"
 除了上述平面模式外，每个 KA 还可以存储在自己的**隔离 LadybugDB 子图**中。这为每次提取提供了独立的命名空间，没有共享表。
 
 ```bash
-he parse examples/zh/tesla.md -o ./output --lang zh \
-  --db tesla_bio
+# 仅保存到 LadybugDB 子图（无需文件系统目录）
+he parse examples/zh/tesla.md -t general/biography_graph --lang zh --db tesla_bio
+
+# 同时保存到两者
+he parse examples/zh/tesla.md -o ./output --lang zh --db tesla_bio
 ```
 
 内部执行 `CREATE GRAPH tesla_bio; USE GRAPH tesla_bio;`，然后创建模式并将所有数据插入该子图。
 
-| 功能 | 平面模式（默认） | 子图（`--db <名称>`） |
-|------|-----------------|----------------------|
+必须提供 `--output` / `-o`（文件系统目录）或 `--db`（子图名称）中的至少一个。两者也可以同时使用。
+
+| 功能 | 平面模式（`-o <目录>`） | 子图（`--db <名称>`） |
+|------|------------------------|----------------------|
 | 表结构 | 所有 KA 共享 | 每 KA 隔离 |
 | 查询隔离 | 按 `ka_id` 过滤 | 完整命名空间隔离 |
 | 删除 | 按 `ka_id` 删除行 | `DROP GRAPH <名称>`（即时） |
