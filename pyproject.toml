@@ -41,7 +41,7 @@ dependencies = [
     "typer>=0.13.0",
     "rich>=13.7.0",
     "tomli-w>=1.0.0",
-    "ladybug>=0.18.1",
+    "ladybug>=0.18.2",
 ]
 
 [dependency-groups]
