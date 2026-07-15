@@ -1,5 +1,6 @@
 """Config command for Hyper-Extract CLI."""
 
+from pathlib import Path
 from typing import Optional
 from rich.console import Console
 from rich.table import Table
@@ -61,6 +62,10 @@ def config_callback(
         ("he config show", "Display current configuration"),
         ("he config llm", "Configure LLM settings"),
         ("he config embedder", "Configure Embedder settings"),
+        (
+            "he config db",
+            "Set/show the LadybugDB database path for subgraph operations",
+        ),
     ]
 
     for cmd, desc in commands_info:
@@ -134,6 +139,14 @@ def _show_config():
     )
 
     console.print(table)
+
+    db_path = cfg.get("db_path", "")
+    if db_path:
+        console.print(f"[cyan]LadybugDB:[/cyan] {db_path}")
+    else:
+        from hyperextract.ladybug_db import _DEFAULT_DB_PATH
+        console.print(f"[dim]LadybugDB: {_DEFAULT_DB_PATH}[/dim]")
+    console.print("[dim]  (he config db <path> to change)[/dim]")
 
 
 @app.command(name="show")
@@ -267,6 +280,42 @@ def embedder(
         base_url=base_url,
     )
     console.print("[green]Embedder configuration updated[/green]")
+
+
+@app.command(name="db")
+def db_cmd(
+    path: Optional[str] = typer.Argument(
+        None, help="LadybugDB database file path (omit to show current)"
+    ),
+    unset: bool = typer.Option(False, "--unset", help="Reset to default database path"),
+):
+    """Configure the LadybugDB database path.
+
+    The default path is ~/.hyperextract/he.lbdb.
+    Commands like 'he list subgraph', 'he info --subgraph', 'he show --subgraph'
+    use this database to discover and query subgraphs.
+    """
+    logger.info("command=config-db path=%s unset=%s", path, unset)
+    config = ConfigManager()
+
+    if unset:
+        config.unset_db_path()
+        console.print("[green]Database path reset to default[/green]")
+        return
+
+    if path:
+        resolved = Path(path).expanduser().resolve()
+        config.set_db_path(str(resolved))
+        console.print(f"[green]LadybugDB path set to: {resolved}[/green]")
+        return
+
+    # Show current
+    current = config.get_db_path()
+    console.print(f"[cyan]LadybugDB database:[/cyan] {current}")
+    console.print()
+    console.print("[dim]Usage:[/dim]")
+    console.print("  [dim]he config db <path>    # set custom database path[/dim]")
+    console.print("  [dim]he config db --unset   # reset to default[/dim]")
 
 
 @app.command(name="init")
