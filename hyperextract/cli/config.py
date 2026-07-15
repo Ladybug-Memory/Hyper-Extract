@@ -118,6 +118,7 @@ class ConfigManager:
         self.config_path = config_path or DEFAULT_CONFIG_FILE
         self.llm = LLMConfig()
         self.embedder = EmbedderConfig()
+        self.db_path: str = ""
         self._load()
 
     def _load(self) -> None:
@@ -132,6 +133,8 @@ class ConfigManager:
             self.llm = LLMConfig.from_dict(data["llm"])
         if "embedder" in data:
             self.embedder = EmbedderConfig.from_dict(data["embedder"])
+        if "db_path" in data:
+            self.db_path = data["db_path"]
 
     def _save(self) -> None:
         """Save configuration to file."""
@@ -141,6 +144,8 @@ class ConfigManager:
             "llm": self.llm.to_dict(),
             "embedder": self.embedder.to_dict(),
         }
+        if self.db_path:
+            data["db_path"] = self.db_path
 
         with open(self.config_path, "wb") as f:
             tomli_w.dump(data, f)
@@ -231,12 +236,32 @@ class ConfigManager:
         self.embedder = EmbedderConfig()
         self._save()
 
+    def set_db_path(self, path: str) -> None:
+        """Set the LadybugDB database path."""
+        self.db_path = path
+        self._save()
+
+    def unset_db_path(self) -> None:
+        """Reset to default LadybugDB database path."""
+        self.db_path = ""
+        self._save()
+
+    def get_db_path(self) -> str:
+        """Return the configured database path, or the default."""
+        if self.db_path:
+            return self.db_path
+        from hyperextract.ladybug_db import _DEFAULT_DB_PATH
+        return str(_DEFAULT_DB_PATH)
+
     def show(self) -> Dict[str, Any]:
         """Show current configuration."""
-        return {
+        result: Dict[str, Any] = {
             "llm": self.get_llm_config().to_dict(),
             "embedder": self.get_embedder_config().to_dict(),
         }
+        if self.db_path:
+            result["db_path"] = self.db_path
+        return result
 
     def validate(self) -> tuple[bool, str]:
         """Validate configuration."""
