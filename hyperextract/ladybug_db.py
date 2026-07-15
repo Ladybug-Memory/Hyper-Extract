@@ -51,10 +51,25 @@ class LadybugDBManager:
     def get_instance(
         cls, db_path: Optional[str] = None
     ) -> "LadybugDBManager":
-        """Get or create the singleton LadybugDBManager instance."""
+        """Get or create the singleton LadybugDBManager instance.
+
+        Resolution order:
+        1. Explicit ``db_path`` argument
+        2. ``HYPER_EXTRACT_DB_PATH`` environment variable
+        3. ``db_path`` from ``~/.he/config.toml``
+        4. Default ``~/.hyperextract/he.lbdb``
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
+                    if db_path is None and _DB_PATH_ENV not in os.environ:
+                        try:
+                            from hyperextract.cli.config import ConfigManager
+                            cfg_path = ConfigManager().get_db_path()
+                            if cfg_path:
+                                db_path = cfg_path
+                        except Exception:
+                            pass
                     cls._instance = cls(db_path=db_path)
         return cls._instance
 
@@ -1224,7 +1239,7 @@ def store_ka_in_subgraph(
                 m = _re.match(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", str(raw_time))
                 if m:
                     y, mo, d = m.group(1), m.group(2) or "01", m.group(3) or "01"
-                    edge_date = f"{y}-{mo}-{d}"
+                    edge_date = datetime(int(y), int(mo), int(d)).date()
 
             # space: JSON with lat/lng doubles and/or string location name
             raw_space = relation.get("space", {})
