@@ -10,8 +10,8 @@ Hyper-Extract 使用 **LadybugDB**（一个可嵌入列式图数据库）作为�
 
 ```bash
 # 1. 配置 LLM + 嵌入器（一次性）
-he config llm --provider opencode-go -k $OPENCODE_API_KEY --model minimax-m3
-he config embedder --provider openrouter -k $OPENROUTER_API_KEY
+he config llm --api-key YOUR_KEY
+he config embedder --api-key YOUR_KEY
 
 # 2. 提取并保存 — LadybugDB 自动存储
 he parse examples/zh/tesla.md -t general/biography_graph -o ./output --lang zh
@@ -21,7 +21,7 @@ he show ./output
 he talk ./output -q "特斯拉发明了什么？"
 ```
 
-无需配置。数据库默认位于 `~/.hyperextract/he.lbdb`（可通过 `HYPER_EXTRACT_DB_PATH` 覆盖）。
+无需配置。数据库默认位于 `~/.hyperextract/he.lbdb`（可通过 `HYPER_EXTRACT_DB_PATH` 或 `he config db <路径>` 覆盖）。
 
 ---
 
@@ -77,26 +77,61 @@ he talk ./output -q "特斯拉发明了什么？"
 
 ```bash
 # 仅保存到 LadybugDB 子图（无需文件系统目录）
-he parse examples/zh/tesla.md -t general/biography_graph --lang zh --db tesla_bio
+he parse examples/zh/tesla.md -t general/biography_graph --lang zh --subgraph tesla_bio
 
-# 同时保存到两者
-he parse examples/zh/tesla.md -o ./output --lang zh --db tesla_bio
+# 同时保存到两者（文件系统和子图）
+he parse examples/zh/tesla.md -o ./output --lang zh --subgraph tesla_bio
 ```
 
 内部执行 `CREATE GRAPH tesla_bio; USE GRAPH tesla_bio;`，然后创建模式并将所有数据插入该子图。
 
 **每个子图是一个单独的 LadybugDB 数据库文件** — `he.<名称>.lbdb` — 在主 `he.lbdb` 的目录中注册。使用 `show_graphs()` 列出它们。
 
-必须提供 `--output` / `-o`（文件系统目录）或 `--db`（子图名称）中的至少一个。两者也可以同时使用。
+必须提供 `--output` / `-o`（文件系统目录）或 `--subgraph`（子图名称）中的至少一个。两者不能同时使用 — 请选择一种存储模式。
 
-| 功能 | 平面模式（`-o <目录>`） | 子图（`--db <名称>`） |
-|------|------------------------|----------------------|
+| 功能 | 平面模式（`-o <目录>`） | 子图（`--subgraph <名称>`） |
+|------|------------------------|----------------------------|
 | 文件 | `he.lbdb`（共享） | `he.<名称>.lbdb`（独立） |
 | 表结构 | 所有 KA 共享 | 每 KA 隔离 |
 | 删除 | 按 `ka_id` 删除行 | `DROP GRAPH <名称>`（即时） |
 | 列出 | `MATCH (ka:KnowledgeAbstract)` | `CALL show_graphs()` 或 `list_ka_subgraphs()` |
 
-### 列出和删除子图
+### 配置数据库路径
+
+默认情况下，LadybugDB 的主数据库位于 `~/.hyperextract/he.lbdb`。您可以使用以下命令配置自定义路径：
+
+```bash
+# 查看当前数据库路径
+he config db
+
+# 设置自定义路径
+he config db /path/to/my.lbdb
+
+# 重置为默认路径
+he config db --unset
+```
+
+### 列出、查看和删除子图
+
+使用 `he list subgraph` CLI 命令来显示所有已注册的子图：
+
+```bash
+he list subgraph
+```
+
+查看子图的元数据和统计信息：
+
+```bash
+he info --subgraph tesla_bio
+```
+
+使用 OntoSight 可视化子图：
+
+```bash
+he show --subgraph tesla_bio
+```
+
+编程方式访问：
 
 ```python
 from hyperextract.ladybug_db import list_ka_subgraphs, delete_ka_subgraph
@@ -109,6 +144,8 @@ print(subgraphs)  # 例如 ["tesla_bio", "my_other_ka"]
 delete_ka_subgraph("tesla_bio")
 ```
 
+**提示：** 所有子图命令（`he list subgraph`、`he info --subgraph`、`he show --subgraph`）都操作于 `he config db` 配置的数据库。使用 `he config db <路径>` 切换到不同的 LadybugDB 数据库。
+
 ### 子图内部存储布局
 
 ```
@@ -116,12 +153,13 @@ delete_ka_subgraph("tesla_bio")
 └── Entity (NODE TABLE)
     ├── {id: "尼古拉·特斯拉", entity_type: "person",    data: {name: "尼古拉·特斯拉", ...}}
     ├── {id: "交流电机",       entity_type: "invention", data: {name: "交流电机", ...}}
-    ├── {id: "_e0",            entity_type: "edge",      data: {_source_id: "尼古拉·特斯拉", _target_id: "交流电机", ...}}
-    ├── {id: "_e1",            entity_type: "edge",      data: {...}}
+    ├── Relates 边存储在 REL TABLE 中
+    │   ├── FROM "尼古拉·特斯拉" TO "交流电机" (invented)
+    │   └── ...
     └── {id: "_meta",          entity_type: "metadata",  data: {template: "...", lang: "zh"}}
 ```
 
-边存储为 `entity_type='edge'` 的 `Entity` 行，因为 LadybugDB 的 `REL TABLE` 与其子图实现无法正常配合使用。
+边使用 LadybugDB 的 `REL TABLE` 进行存储，包含类型化关系列（`time`、`space`、`confidence`、`data`）。
 
 ### 编程方式访问子图
 
@@ -152,100 +190,7 @@ print(all_sgs)  # 例如 ["tesla_bio", ...]
 delete_ka_subgraph("tesla_bio")
 ```
 
-边存储为 `entity_type='edge'` 的 `Entity` 行，因为 LadybugDB 的 `REL TABLE` 在子图内部无法正常工作。
-
----
-
-## LLM 响应缓存
-
-每个 LLM 调用都会缓存在 `~/.he/llm_cache/responses.db` 的本地 SQLite 数据库中。缓存键基于完整的提示文本（包括工具定义），因此：
-
-- **解析错误后重新运行**相同的提取会立即返回缓存结果 — 零 API 成本。
-- **调试失败的合并**（例如 `<think>` 标签包装）不会在重试时再次消耗令牌。
-- 缓存在 CLI 调用之间持久存在。
-
-首次创建 LLM 客户端时自动启用。无需配置。
-
-```
-~/.he/
-├── config.toml         # LLM / 嵌入器配置
-└── llm_cache/
-    └── responses.db    # SQLite 缓存（自动创建）
-```
-
----
-
-## LLM 和嵌入器配置
-
-LadybugDB 是存储层 — 它不替代 LLM 或嵌入器。您需要单独配置它们。
-
-### 提供商预设
-
-Hyper-Extract 内置了多个提供商的预设：
-
-| 提供商 | 基础 URL | 默认 LLM | 默认嵌入器 |
-|--------|----------|-------------|------------------|
-| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `text-embedding-3-small` |
-| `bailian` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.6-plus` | `text-embedding-v4` |
-| `vllm` | *（必需）* | *（必需）* | *（必需）* |
-| `anthropic` / `claude` | *（原生 SDK）* | `claude-opus-4-8` | *（无 — 搭配 openai）* |
-| `opencode-go` | `https://opencode.ai/zen/go/v1` | `minimax-m3` | *（无）* |
-| `openrouter` | `https://openrouter.ai/api/v1` | `deepseek/deepseek-v4-flash` | *（无）* |
-
-### CLI 配置
-
-```bash
-# 交互式设置
-he config init -p openai -k sk-...
-
-# 或单独设置
-he config llm --provider opencode-go -k $OPENCODE_API_KEY --model minimax-m3
-he config embedder --provider openai -k $OPENAI_API_KEY
-
-# 覆盖基础 URL
-he config llm --provider vllm -u http://localhost:8000/v1 -k dummy -m Qwen/Qwen3.5-9B
-
-# 查看当前配置
-he config show
-```
-
-设置保存在 `~/.he/config.toml`：
-
-```toml
-[llm]
-provider = "opencode-go"
-model = "minimax-m3"
-api_key = "sk-..."
-
-[embedder]
-provider = "openai"
-model = "text-embedding-3-small"
-api_key = "sk-..."
-```
-
-### API 密钥解析
-
-按以下顺序解析密钥（第一个非空值胜出）：
-
-1. **配置文件**（`~/.he/config.toml`）— 通过 `he config llm -k ...` 设置
-2. **环境变量** — 按提供商检查：
-
-| 提供商 | 环境变量（按顺序检查） |
-|--------|-----------------------|
-| `openai` | `OPENAI_API_KEY` |
-| `bailian` | `OPENAI_API_KEY` |
-| `vllm` | `OPENAI_API_KEY` |
-| `anthropic` / `claude` | `ANTHROPIC_API_KEY`、`CLAUDE_API_KEY` |
-| `opencode-go` | `OPENCODE_GO_API_KEY` |
-| `openrouter` | `OPENROUTER_API_KEY` |
-
-如果找不到密钥，验证将失败并显示清晰的错误消息。
-
-### 结构化输出方法
-
-所有提取都使用 `with_structured_output(method="function_calling")`。不支持函数调用的模型（例如某些提供商上的 `deepseek-v4-flash`）将返回 400 错误 — 请切换到兼容的模型，如 `minimax-m3` 或 `deepseek-v4-pro`。
-
----
+边使用 LadybugDB 的 `REL TABLE` 进行存储，包含类型化关系列（`time`、`space`、`confidence`、`data`）。
 
 ## 完整端到端流程
 
@@ -254,21 +199,21 @@ api_key = "sk-..."
     │
     ▼
 ┌──────────────────┐
-│  1. 配置          │  he config llm --provider ... -k ... --model ...
-│  LLM + 嵌入器     │  he config embedder --provider ... -k ...
+│  1. 配置          │  he config llm --api-key YOUR_KEY
+│  LLM + 嵌入器     │  he config embedder --api-key YOUR_KEY
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
 │  2. 解析文本      │  he parse input.txt -t general/graph -o ./output --lang zh
-│                  │
+│                  │     或: he parse input.txt --subgraph my_graph ...
 │  ┌────────────┐  │
 │  │ 分块        │  │  将长文本拆分为可管理的片段
 │  └──────┬─────┘  │
 │         ▼        │
 │  ┌────────────┐  │
-│  │ 提取节点/边  │  │  with_structured_output(method="function_calling")
-│  │             │  │  提示 + LLM → 结构化 JSON
+│  │ 提取节点/边  │  │  提示 + LLM → 结构化 JSON
+│  │             │  │
 │  └──────┬─────┘  │
 │         ▼        │
 │  ┌────────────┐  │
@@ -278,7 +223,7 @@ api_key = "sk-..."
 │         ▼        │
 │  ┌────────────┐  │
 │  │ 保存到       │  │
-│  │ LadybugDB   │  │  平面模式 + 可选的子图（--db）
+│  │ LadybugDB   │  │  平面模式 + 可选的子图（--subgraph）
 │  │ + 文件系统   │  │
 │  └────────────┘  │
 └──────────────────┘
@@ -292,6 +237,9 @@ api_key = "sk-..."
 │  he talk ...     │  与知识抽象对话
 │  he build-index  │  构建/重建 FAISS 索引
 │  he feed ...     │  追加更多文档
+│  he show --subgraph <名称> │  可视化子图
+│  he info --subgraph <名称> │  查看子图信息
+│  he list subgraph │  列出所有子图
 └──────────────────┘
 ```
 
@@ -307,6 +255,9 @@ api_key = "sk-..."
 
 # 自定义（在任何命令前设置）
 export HYPER_EXTRACT_DB_PATH=/path/to/my.lbdb
+
+# 或通过 CLI 命令（持久化）
+he config db /path/to/my.lbdb
 ```
 
 ### 从损坏的数据库中恢复
@@ -316,6 +267,21 @@ export HYPER_EXTRACT_DB_PATH=/path/to/my.lbdb
 ```bash
 rm -f ~/.hyperextract/he.lbdb*
 ```
+
+### 数据库路径管理
+
+```bash
+# 查看当前数据库路径
+he config db
+
+# 设置自定义路径
+he config db /path/to/my.lbdb
+
+# 重置为默认路径
+he config db --unset
+```
+
+**注意：** 数据库路径也可以通过 `HYPER_EXTRACT_DB_PATH` 环境变量设置。如果两者都设置了，环境变量优先级更高。
 
 下次运行时将重新创建空数据库。模板需要重新迁移。
 
