@@ -121,7 +121,7 @@ def subgraph():
 
     if not subgraphs:
         console.print("[yellow]No subgraphs found.[/yellow]")
-        console.print("[dim]Create one with: he parse ... --db <name>[/dim]")
+        console.print("[dim]Create one with: he parse ... --subgraph <name>[/dim]")
         return
 
     table = Table(
@@ -137,7 +137,18 @@ def subgraph():
     console.print(table)
     console.print(f"\n[dim]Total: {len(subgraphs)} subgraphs[/dim]")
     console.print()
-    console.print("[dim]Usage: use --db <name> with he parse / he show / he talk[/dim]")
+    console.print("[dim]Usage:[/dim]")
+    console.print(
+        "  [dim]he info --subgraph <name>    # show subgraph statistics[/dim]"
+    )
+    console.print(
+        "  [dim]he show --subgraph <name>   # visualize subgraph[/dim]"
+    )
+    console.print()
+    console.print("[dim]Tip: Use [bold]he parse ... --subgraph <name>[/bold] to create a new subgraph[/dim]")
+    console.print(
+        "[dim]     Database: [bold]he config db[/bold] to view/change the database path[/dim]"
+    )
 
 
 @app.command(name="method")

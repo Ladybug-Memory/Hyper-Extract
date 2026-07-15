@@ -28,6 +28,17 @@ from .config import (
 
 from .commands import list_app, config_app
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_db(db: str | None) -> str:
+    """Return the subgraph name from --subgraph, or empty string if not given."""
+    return db or ""
+
+
 console = Console()
 logger = get_logger("he")
 
@@ -223,7 +234,7 @@ def parse(
         ..., help="Input file path, directory, or '-' for stdin"
     ),
     output: Optional[str] = typer.Option(
-        None, "--output", "-o", help="Output directory (required unless --db is set)"
+        None, "--output", "-o", help="Output directory (required unless --subgraph is set)"
     ),
     template: Optional[str] = typer.Option(
         None, "--template", "-t", help="Template (omit for interactive selection)"
@@ -241,29 +252,29 @@ def parse(
     no_index: bool = typer.Option(
         False, "--no-index", help="Skip building search index"
     ),
-    db: Optional[str] = typer.Option(
+    subgraph: Optional[str] = typer.Option(
         None,
-        "--db",
+        "--subgraph",
         help="Save to a LadybugDB subgraph instead of a directory (value = graph name)",
     ),
 ):
     """Extract knowledge from text to a new directory or LadybugDB subgraph.
 
-    At least one of --output / -o or --db must be provided.
+    At least one of --output / -o or --subgraph must be provided.
     """
     logger.info(
-        "command=parse input=%s output=%s db=%s template=%s lang=%s",
+        "command=parse input=%s output=%s subgraph=%s template=%s lang=%s",
         input,
         output,
-        db,
+        subgraph,
         template or "auto",
         lang or "auto",
     )
 
-    if not output and not db:
+    if not output and not subgraph:
         console.print(
             "[red]Error:[/red] Either --output / -o (filesystem directory) or "
-            "--db (LadybugDB subgraph) must be provided."
+            "--subgraph (LadybugDB subgraph) must be provided."
         )
         raise typer.Exit(1)
 
@@ -303,7 +314,7 @@ def parse(
                 raise typer.Exit(1)
         output_path.mkdir(parents=True, exist_ok=True)
 
-    dest_desc = f"LadybugDB subgraph '{db}'" if db else output
+    dest_desc = f"LadybugDB subgraph '{subgraph}'" if subgraph else output
     console.print(f"[blue]Input:[/blue] {input}")
     console.print(f"[blue]Destination:[/blue] {dest_desc}")
     console.print(f"[blue]Template:[/blue] {template}")
@@ -368,7 +379,7 @@ def parse(
 
         progress.update(task, description="Saving data...")
 
-        # Save to LadybugDB subgraph (--db) and/or filesystem (-o)
+        # Save to LadybugDB subgraph (--subgraph) and/or filesystem (-o)
         data_dict = (
             ka.data.model_dump()
             if hasattr(ka.data, "model_dump")
@@ -390,15 +401,15 @@ def parse(
             ka.dump(output_path)
             logger.info("stage=data_saved output=%s", output_path)
 
-        if db:
+        if subgraph:
             from hyperextract.ladybug_db import store_ka_in_subgraph
 
             store_ka_in_subgraph(
-                graph_name=db,
+                graph_name=subgraph,
                 data_dict=data_dict,
                 metadata=dict(ka.metadata),
             )
-            logger.info("stage=subgraph_saved graph=%s", db)
+            logger.info("stage=subgraph_saved graph=%s", subgraph)
 
         if output and not no_index:
             progress.update(task, description="Building search index...")
@@ -443,9 +454,93 @@ def parse(
 
 
 @app.command(name="show")
-def show(ka_path: str = typer.Argument(..., help="Knowledge Abstract directory")):
-    """Visualize Knowledge Abstract using OntoSight."""
-    logger.info("command=show ka_path=%s", ka_path)
+def show(
+    ka_path: Optional[str] = typer.Argument(
+        None, help="Knowledge Abstract directory (or use --subgraph for a subgraph)"
+    ),
+    subgraph: Optional[str] = typer.Option(
+        None,
+        "--subgraph",
+        help="LadybugDB subgraph name (within DB configured by `he config db`)",
+    ),
+):
+    """Visualize Knowledge Abstract using OntoSight.
+
+    Visualize a filesystem KA directory, or a LadybugDB subgraph
+    inside the database configured via ``he config db``.
+    """
+    logger.info("command=show ka_path=%s subgraph=%s", ka_path, subgraph)
+
+    subgraph_name = _resolve_db(subgraph)
+
+    if subgraph_name:
+        # ---- Subgraph mode ----
+        from hyperextract.ladybug_db import load_ka_from_subgraph
+
+        data, metadata = load_ka_from_subgraph(subgraph_name)
+        if data is None:
+            console.print(f"[red]Subgraph '{subgraph_name}' not found or empty.[/red]")
+            raise typer.Exit(1)
+
+        template_name = metadata.get("template", "") if metadata else ""
+        lang = metadata.get("lang", "en") if metadata else "en"
+
+        if not template_name:
+            console.print("[red]No template metadata found in subgraph.[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[blue]Template:[/blue] {template_name}")
+        console.print(f"[blue]Language:[/blue] {lang}")
+        console.print()
+
+        validate_config()
+
+        with console.status("[bold blue]Loading Knowledge Abstract from subgraph..."):
+            try:
+                ka = Template.create(template_name, lang)
+                # Set data directly from the subgraph
+                validated = ka._data_schema.model_validate(data)
+                ka._set_data_state(validated)
+                if metadata:
+                    for key, value in metadata.items():
+                        if key in ("created_at", "updated_at"):
+                            if isinstance(value, str):
+                                from datetime import datetime
+                                try:
+                                    value = datetime.fromisoformat(value)
+                                except ValueError:
+                                    pass
+                        ka.metadata[key] = value
+            except Exception as e:
+                console.print(f"[red]Error loading subgraph:[/red] {e}")
+                raise typer.Exit(1)
+
+        console.print("[bold blue]Visualizing with OntoSight...[/bold blue]")
+        logger.info("stage=visualizing")
+
+        try:
+            ka.show()
+            logger.info("stage=visualization_complete")
+        except Exception as e:
+            console.print(f"[red]Error during visualization:[/red] {e}")
+            raise typer.Exit(1)
+
+        console.print()
+        console.print("[dim]Continue exploring:[/dim]")
+        console.print(
+            f'[dim]  he info --subgraph {subgraph_name}  # Show subgraph statistics[/dim]'
+        )
+        return
+
+    # ---- Filesystem KA ----
+    if not ka_path:
+        console.print(
+            "[red]Error:[/red] Either a KA_PATH argument or --subgraph <name> is required.\n"
+            "  [dim]he show --subgraph <name>  # subgraph inside LadybugDB\n"
+            "  [dim]he show <directory>        # filesystem KA[/dim]"
+        )
+        raise typer.Exit(1)
+
     path = validate_ka_with_data(ka_path)
 
     template, lang = get_template_from_ka(path)
@@ -567,11 +662,65 @@ app.add_typer(export_app, name="export")
 
 
 @app.command(name="info")
-def info(ka_path: str = typer.Argument(..., help="Knowledge Abstract directory")):
-    """View Knowledge Abstract information and statistics."""
-    logger.info("command=info ka_path=%s", ka_path)
+def info(
+    ka_path: Optional[str] = typer.Argument(
+        None, help="Knowledge Abstract directory (or use --subgraph for a subgraph)"
+    ),
+    subgraph: Optional[str] = typer.Option(
+        None,
+        "--subgraph",
+        help="LadybugDB subgraph name (within DB configured by `he config db`)",
+    ),
+):
+    """View Knowledge Abstract information and statistics.
+
+    Inspect a filesystem KA directory, or a LadybugDB subgraph
+    inside the database configured via ``he config db``.
+    """
     import json
 
+    # ---- Resolve target: subgraph or filesystem ----
+    subgraph_name = _resolve_db(subgraph)
+
+    if subgraph_name:
+        logger.info("command=info subgraph=%s", subgraph_name)
+        from hyperextract.ladybug_db import load_ka_from_subgraph
+
+        data, metadata = load_ka_from_subgraph(subgraph_name)
+        if data is None:
+            console.print(f"[red]Subgraph '{subgraph_name}' not found or empty.[/red]")
+            raise typer.Exit(1)
+
+        node_count = len(data.get("nodes", []))
+        edge_count = len(data.get("edges", []))
+        item_count = len(data.get("items", []))
+
+        table = Table(title=f"Subgraph: {subgraph_name}", show_header=False, box=None)
+        table.add_column("Key", style="cyan", width=15)
+        table.add_column("Value", style="green")
+        table.add_row("Type", "LadybugDB Subgraph")
+        if metadata:
+            table.add_row("Template", metadata.get("template", "unknown"))
+            table.add_row("Language", metadata.get("lang", "unknown"))
+            table.add_row("Created", str(metadata.get("created_at", "unknown")))
+            table.add_row("Updated", str(metadata.get("updated_at", "unknown")))
+        table.add_row("Nodes", str(node_count))
+        table.add_row("Edges", str(edge_count))
+        if item_count:
+            table.add_row("Items", str(item_count))
+        console.print(table)
+        return
+
+    # ---- Filesystem KA ----
+    if not ka_path:
+        console.print(
+            "[red]Error:[/red] Either a KA_PATH argument or --subgraph <name> is required.\n"
+            "  [dim]he info --subgraph <name>   # subgraph inside LadybugDB\n"
+            "  [dim]he info <directory>         # filesystem KA[/dim]"
+        )
+        raise typer.Exit(1)
+
+    logger.info("command=info ka_path=%s", ka_path)
     path = validate_ka_with_data(ka_path)
 
     metadata = load_ka_metadata(path)
